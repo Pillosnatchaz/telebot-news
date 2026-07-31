@@ -22,6 +22,7 @@ NEWS_URL = os.environ.get("NEWS_URL", "https://nfs.faireconomy.media/ff_calendar
 BOT_TOKEN = os.environ.get("TELEGRAM_BOT_TOKEN")
 CHAT_ID = os.environ.get("TELEGRAM_CHAT_ID")
 SILENT_IF_EMPTY = os.environ.get("SILENT_IF_EMPTY", "false").lower() == "true"
+DISABLE_NOTIFICATION = os.environ.get("DISABLE_NOTIFICATION", "false").lower() == "true"
 
 # Timezone definition for WIB (Western Indonesia Time / UTC+7)
 WIB = timezone(timedelta(hours=7))
@@ -29,18 +30,24 @@ WIB = timezone(timedelta(hours=7))
 # Keywords for high-impact market moving economic events
 CRITICAL_KEYWORDS = ["CPI", "FOMC", "NFP", "NON-FARM PAYROLLS", "FED RATE", "INTEREST RATE", "INFLATION", "PPI", "GDP"]
 
-def send_telegram(text: str) -> None:
+def send_telegram(text: str, silent: bool = False) -> None:
     if not BOT_TOKEN or not CHAT_ID:
         print("[ERROR] TELEGRAM_BOT_TOKEN or TELEGRAM_CHAT_ID missing from .env or environment.")
         sys.exit(1)
     
     url = f"https://api.telegram.org/bot{BOT_TOKEN}/sendMessage"
-    payload = json.dumps({"chat_id": CHAT_ID, "text": text, "parse_mode": "HTML"}).encode("utf-8")
+    payload_dict = {
+        "chat_id": CHAT_ID, 
+        "text": text, 
+        "parse_mode": "HTML",
+        "disable_notification": silent or DISABLE_NOTIFICATION
+    }
+    payload = json.dumps(payload_dict).encode("utf-8")
     req = urllib.request.Request(url, data=payload, headers={"Content-Type": "application/json"})
     
     try:
         with urllib.request.urlopen(req) as resp:
-            print(f"[SUCCESS] Telegram message sent. Status: {resp.status}")
+            print(f"[SUCCESS] Telegram message sent (silent={silent or DISABLE_NOTIFICATION}). Status: {resp.status}")
     except urllib.error.HTTPError as e:
         print(f"[ERROR] Telegram API failed: {e.code} - {e.read().decode('utf-8')}")
         sys.exit(1)
@@ -159,11 +166,13 @@ def main():
         for title, time_info in events[:5]:
             alerts.append(f"⚠️ There will be <b>{title}</b> {time_info}!")
         
-        send_telegram("\n\n".join(alerts))
+        # Send critical news alerts with audible notification sound
+        send_telegram("\n\n".join(alerts), silent=False)
     else:
         print("[INFO] No upcoming critical economic news (CPI/FOMC/NFP) scheduled right now.")
         if not SILENT_IF_EMPTY:
-            send_telegram("ℹ️ <b>Hourly Economic News Check</b>\n\nNo upcoming critical events (CPI/FOMC/NFP) scheduled right now.")
+            # Send status checks silently without notification sound/vibration
+            send_telegram("ℹ️ <b>Hourly Economic News Check</b>\n\nNo upcoming critical events (CPI/FOMC/NFP) scheduled right now.", silent=True)
 
 if __name__ == "__main__":
     main()
