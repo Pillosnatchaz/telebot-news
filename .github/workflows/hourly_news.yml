@@ -1,0 +1,27 @@
+name: Hourly Economic News Bot
+
+on:
+  schedule:
+    - cron: '0 * * * *' # Runs at minute 0 of every hour
+  workflow_dispatch:     # Allows manual trigger button in GitHub UI
+
+jobs:
+  run-bot:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout Code
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+
+      # ponytail: stdlib python script requires 0 pip installs. Execution takes ~5 seconds.
+      - name: Run Bot Script
+        env:
+          TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
+          TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
+          NEWS_URL: ${{ secrets.NEWS_URL }}
+        run: python bot.py
