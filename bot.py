@@ -21,6 +21,7 @@ load_dotenv()
 NEWS_URL = os.environ.get("NEWS_URL", "https://nfs.faireconomy.media/ff_calendar_thisweek.json")
 BOT_TOKEN = os.environ.get("TELEGRAM_BOT_TOKEN")
 CHAT_ID = os.environ.get("TELEGRAM_CHAT_ID")
+TOPIC_ID = os.environ.get("TELEGRAM_TOPIC_ID") or os.environ.get("MESSAGE_THREAD_ID")
 SILENT_IF_EMPTY = os.environ.get("SILENT_IF_EMPTY", "false").lower() == "true"
 DISABLE_NOTIFICATION = os.environ.get("DISABLE_NOTIFICATION", "false").lower() == "true"
 
@@ -42,12 +43,19 @@ def send_telegram(text: str, silent: bool = False) -> None:
         "parse_mode": "HTML",
         "disable_notification": silent or DISABLE_NOTIFICATION
     }
+    
+    if TOPIC_ID:
+        try:
+            payload_dict["message_thread_id"] = int(TOPIC_ID)
+        except ValueError:
+            print(f"[WARNING] Invalid TELEGRAM_TOPIC_ID '{TOPIC_ID}', ignoring thread ID.")
+
     payload = json.dumps(payload_dict).encode("utf-8")
     req = urllib.request.Request(url, data=payload, headers={"Content-Type": "application/json"})
     
     try:
         with urllib.request.urlopen(req) as resp:
-            print(f"[SUCCESS] Telegram message sent (silent={silent or DISABLE_NOTIFICATION}). Status: {resp.status}")
+            print(f"[SUCCESS] Telegram message sent (topic={TOPIC_ID}, silent={silent or DISABLE_NOTIFICATION}). Status: {resp.status}")
     except urllib.error.HTTPError as e:
         print(f"[ERROR] Telegram API failed: {e.code} - {e.read().decode('utf-8')}")
         sys.exit(1)
