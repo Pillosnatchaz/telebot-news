@@ -2,6 +2,7 @@ import os
 import sys
 import json
 import html
+import time
 import urllib.request
 import urllib.error
 from datetime import datetime, timezone, timedelta
@@ -24,6 +25,8 @@ CHAT_ID = os.environ.get("TELEGRAM_CHAT_ID")
 TOPIC_ID = os.environ.get("TELEGRAM_TOPIC_ID") or os.environ.get("MESSAGE_THREAD_ID")
 SILENT_IF_EMPTY = os.environ.get("SILENT_IF_EMPTY", "false").lower() == "true"
 DISABLE_NOTIFICATION = os.environ.get("DISABLE_NOTIFICATION", "false").lower() == "true"
+CACHE_FILE = os.environ.get("CACHE_FILE", "news_cache.json")
+CACHE_TTL = int(os.environ.get("CACHE_TTL_SECONDS", "3600"))
 
 # Timezone definition for WIB (Western Indonesia Time / UTC+7)
 WIB = timezone(timedelta(hours=7))
@@ -72,21 +75,72 @@ def parse_date(date_val):
     dt = datetime.fromisoformat(clean_date)
     return dt if dt.tzinfo else dt.replace(tzinfo=timezone.utc)
 
-def parse_economic_news(raw_data: str) -> str:
+def fetch_news_data() -> str:
+    """
+    ponytail: stdlib file cacher (default 1h TTL). Falls back to cached data if ForexFactory returns 429/error.
+    """
+    now_ts = time.time()
+    
+    if os.path.exists(CACHE_FILE):
+        mtime = os.path.getmtime(CACHE_FILE)
+        if now_ts - mtime < CACHE_TTL:
+            print(f"[INFO] Using cached news from {CACHE_FILE} ({int(now_ts - mtime)}s old).")
+            try:
+                with open(CACHE_FILE, "r", encoding="utf-8") as f:
+                    return f.read()
+            except Exception:
+                pass
+
+    if not NEWS_URL:
+        print("[ERROR] NEWS_URL is not set in .env or environment variables.")
+        sys.exit(1)
+
+    print(f"[INFO] Fetching fresh news from {NEWS_URL}...")
+    headers = {
+        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
+        "Accept": "application/json, text/plain, */*"
+    }
+    req = urllib.request.Request(NEWS_URL, headers=headers)
+
+    try:
+        with urllib.request.urlopen(req, timeout=15) as resp:
+            raw_data = resp.read().decode("utf-8", errors="ignore")
+            print(f"[INFO] Successfully fetched {len(raw_data)} bytes.")
+            try:
+                with open(CACHE_FILE, "w", encoding="utf-8") as f:
+                    f.write(raw_data)
+            except Exception as e:
+                print(f"[WARNING] Failed to write cache: {e}")
+            return raw_data
+    except Exception as e:
+        print(f"[ERROR] Failed to fetch news from {NEWS_URL}: {e}")
+        if os.path.exists(CACHE_FILE):
+            print(f"[INFO] Fallback: using cached news from {CACHE_FILE}.")
+            try:
+                with open(CACHE_FILE, "r", encoding="utf-8") as f:
+                    return f.read()
+            except Exception:
+                pass
+        sys.exit(1)
+
+def parse_economic_news(raw_data: str) -> list[str]:
     """
     Parses ForexFactory JSON news feed based solely on High/Medium/Low impact.
     Groups events by impact and WIB time with Indonesian day names.
+    Returns list of message chunks formatted for Telegram HTML (each <= 3900 chars).
     """
     try:
         data = json.loads(raw_data)
     except Exception:
-        return ""
+        return []
 
     if not isinstance(data, list):
-        return ""
+        return []
 
     now = datetime.now(timezone.utc)
     groups = {}
+
+    CRITICAL_KEYWORDS = ("FOMC", "CPI", "NFP", "FED", "RATE", "INFLATION", "GDP")
 
     for item in data:
         impact = str(item.get("impact", "")).upper()
@@ -102,7 +156,7 @@ def parse_economic_news(raw_data: str) -> str:
         except Exception:
             continue
 
-        # Include upcoming or recent events (from 15 mins ago onwards)
+        # ponytail: include full week's upcoming/recent events (from 15 mins ago onwards)
         if (event_dt - now).total_seconds() < -900:
             continue
 
@@ -111,18 +165,23 @@ def parse_economic_news(raw_data: str) -> str:
         if not title:
             continue
 
+        # ponytail: include High & Medium impact, plus Low impact only if title contains critical keywords (e.g. FOMC).
+        is_high_med = impact in ("HIGH", "MEDIUM")
+        is_low_critical = impact == "LOW" and any(kw in title.upper() for kw in CRITICAL_KEYWORDS)
+        if not (is_high_med or is_low_critical):
+            continue
+
         key = (event_dt, impact)
         if key not in groups:
             groups[key] = []
         groups[key].append((country, title))
 
     if not groups:
-        return ""
+        return []
 
     sorted_keys = sorted(groups.keys(), key=lambda k: k[0])
     blocks = []
 
-    # ponytail: text output limited by Telegram HTML message payload ceiling of 4096 characters.
     for dt, impact in sorted_keys:
         emoji = IMPACT_EMOJI[impact]
         dt_wib = dt.astimezone(WIB)
@@ -138,37 +197,34 @@ def parse_economic_news(raw_data: str) -> str:
         
         blocks.append("\n".join(lines))
 
-    # ponytail: if payload exceeds Telegram 4000 chars, truncate or split (here we take top 4000 chars).
-    full_text = "\n\n".join(blocks)
-    if len(full_text) > 4000:
-        full_text = full_text[:3990] + "\n..."
-    return full_text
+    # ponytail: chunk by whole blocks (max 3900 chars per message) to safely avoid cutting HTML tags in half.
+    chunks = []
+    current_chunk = []
+    current_len = 0
+
+    for block in blocks:
+        if current_len + len(block) + 2 > 3900:
+            if current_chunk:
+                chunks.append("\n\n".join(current_chunk))
+            current_chunk = [block]
+            current_len = len(block)
+        else:
+            current_chunk.append(block)
+            current_len += len(block) + 2
+
+    if current_chunk:
+        chunks.append("\n\n".join(current_chunk))
+
+    return chunks
 
 def main():
-    if not NEWS_URL:
-        print("[ERROR] NEWS_URL is not set in .env or environment variables.")
-        sys.exit(1)
-
-    print(f"[INFO] Fetching news from {NEWS_URL}...")
-    headers = {
-        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
-        "Accept": "application/json, text/plain, */*"
-    }
-    req = urllib.request.Request(NEWS_URL, headers=headers)
+    raw_data = fetch_news_data()
+    chunks = parse_economic_news(raw_data)
     
-    try:
-        with urllib.request.urlopen(req, timeout=15) as resp:
-            raw_data = resp.read().decode("utf-8", errors="ignore")
-            print(f"[INFO] Successfully fetched {len(raw_data)} bytes.")
-    except Exception as e:
-        print(f"[ERROR] Failed to fetch news from {NEWS_URL}: {e}")
-        sys.exit(1)
-
-    events_text = parse_economic_news(raw_data)
-    
-    if events_text:
-        print("[INFO] Upcoming economic news formatted successfully.")
-        send_telegram(events_text, silent=False)
+    if chunks:
+        print(f"[INFO] Sending {len(chunks)} message chunk(s)...")
+        for chunk in chunks:
+            send_telegram(chunk, silent=False)
     else:
         print("[INFO] No upcoming economic news found.")
         if not SILENT_IF_EMPTY:
