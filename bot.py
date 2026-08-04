@@ -1,7 +1,7 @@
 import os
 import sys
 import json
-import re
+import html
 import urllib.request
 import urllib.error
 from datetime import datetime, timezone, timedelta
@@ -28,8 +28,13 @@ DISABLE_NOTIFICATION = os.environ.get("DISABLE_NOTIFICATION", "false").lower() =
 # Timezone definition for WIB (Western Indonesia Time / UTC+7)
 WIB = timezone(timedelta(hours=7))
 
-# Keywords for high-impact market moving economic events
-CRITICAL_KEYWORDS = ["CPI", "FOMC", "NFP", "NON-FARM PAYROLLS", "FED RATE", "INTEREST RATE", "INFLATION", "PPI", "GDP"]
+INDONESIAN_DAYS = ("Senin", "Selasa", "Rabu", "Kamis", "Jumat", "Sabtu", "Minggu")
+
+IMPACT_EMOJI = {
+    "HIGH": "🔴",
+    "MEDIUM": "🟡",
+    "LOW": "🔵"
+}
 
 def send_telegram(text: str, silent: bool = False) -> None:
     if not BOT_TOKEN or not CHAT_ID:
@@ -55,96 +60,89 @@ def send_telegram(text: str, silent: bool = False) -> None:
     
     try:
         with urllib.request.urlopen(req) as resp:
-            print(f"[SUCCESS] Telegram message sent (topic={TOPIC_ID}, silent={silent or DISABLE_NOTIFICATION}). Status: {resp.status}")
+            print(f"[SUCCESS] Telegram message sent. Status: {resp.status}")
     except urllib.error.HTTPError as e:
         print(f"[ERROR] Telegram API failed: {e.code} - {e.read().decode('utf-8')}")
         sys.exit(1)
 
-def format_event_time(date_str: str):
-    """
-    Parses date timestamp and formats precise countdown: 'in X hours Y minutes (HH:MM WIB)'.
-    Returns tuple: (minutes_total: int, time_label: str)
-    """
-    try:
-        now = datetime.now(timezone.utc)
-        if isinstance(date_str, (int, float)):
-            event_time = datetime.fromtimestamp(date_str, timezone.utc)
-        else:
-            clean_date = str(date_str).replace("Z", "+00:00")
-            event_time = datetime.fromisoformat(clean_date)
-            if event_time.tzinfo is None:
-                event_time = event_time.replace(tzinfo=timezone.utc)
-        
-        diff = event_time - now
-        minutes_total = int(diff.total_seconds() // 60)
-        time_wib = event_time.astimezone(WIB).strftime("%H:%M WIB")
-        
-        if minutes_total > 0:
-            hours = minutes_total // 60
-            mins = minutes_total % 60
-            if hours > 0:
-                label = f"in {hours} hour{'s' if hours > 1 else ''} {mins} minute{'s' if mins != 1 else ''} ({time_wib})"
-            else:
-                label = f"in {mins} minute{'s' if mins != 1 else ''} ({time_wib})"
-        elif minutes_total > -60:
-            label = f"releasing right now / recent ({time_wib})"
-        else:
-            label = f"passed ({abs(minutes_total)//60}h ago)"
-            
-        return minutes_total, label
-    except Exception:
-        return 99999, f"at {date_str}"
+def parse_date(date_val):
+    if isinstance(date_val, (int, float)):
+        return datetime.fromtimestamp(date_val, timezone.utc)
+    clean_date = str(date_val).replace("Z", "+00:00")
+    dt = datetime.fromisoformat(clean_date)
+    return dt if dt.tzinfo else dt.replace(tzinfo=timezone.utc)
 
-def parse_economic_news(raw_data: str):
+def parse_economic_news(raw_data: str) -> str:
     """
-    Parses JSON calendar feed or HTML text for upcoming CPI/FOMC/NFP events.
-    Returns list of upcoming events sorted by closest time first.
+    Parses ForexFactory JSON news feed based solely on High/Medium/Low impact.
+    Groups events by impact and WIB time with Indonesian day names.
     """
-    upcoming_events = []
-    
-    # 1. Parse JSON feed (ForexFactory / Economic Calendar API)
     try:
         data = json.loads(raw_data)
-        if isinstance(data, list):
-            for item in data:
-                title = str(item.get("title", "") or item.get("name", "") or item.get("event", "")).strip()
-                country = str(item.get("country", "")).strip()
-                title_upper = title.upper()
-                impact = str(item.get("impact", "")).upper()
-                date_str = item.get("date") or item.get("time") or item.get("timestamp")
-                
-                is_critical = any(kw in title_upper for kw in CRITICAL_KEYWORDS) or impact in ["HIGH", "CRITICAL"]
-                
-                if is_critical and title and date_str:
-                    mins_left, time_label = format_event_time(date_str)
-                    
-                    # Only include upcoming events (future or releasing in next 24h)
-                    if mins_left >= -15:
-                        full_name = f"[{country}] {title}" if country else title
-                        upcoming_events.append((mins_left, full_name, time_label))
-            
-            # Sort upcoming events (closest time first)
-            upcoming_events.sort(key=lambda x: x[0])
-            
-            if upcoming_events:
-                return [(e[1], e[2]) for e in upcoming_events]
     except Exception:
-        pass
+        return ""
 
-    # 2. ponytail: Fallback regex parser for plain text / HTML content
-    lines = raw_data.splitlines()
-    for line in lines:
-        line_upper = line.upper()
-        for kw in CRITICAL_KEYWORDS:
-            if kw in line_upper:
-                clean_text = re.sub(r'<[^>]+>', ' ', line).strip()
-                if 5 < len(clean_text) < 120:
-                    time_match = re.search(r'\b(\d{1,2}:\d{2}\s*(?:AM|PM|UTC)?)\b', clean_text, re.IGNORECASE)
-                    time_str = f"at {time_match.group(1)} WIB" if time_match else "scheduled today"
-                    upcoming_events.append((0, clean_text, time_str))
-                break
+    if not isinstance(data, list):
+        return ""
 
-    return [(e[1], e[2]) for e in upcoming_events]
+    now = datetime.now(timezone.utc)
+    groups = {}
+
+    for item in data:
+        impact = str(item.get("impact", "")).upper()
+        if impact not in IMPACT_EMOJI:
+            continue
+        
+        date_str = item.get("date") or item.get("time") or item.get("timestamp")
+        if not date_str:
+            continue
+            
+        try:
+            event_dt = parse_date(date_str)
+        except Exception:
+            continue
+
+        # Include upcoming or recent events (from 15 mins ago onwards)
+        if (event_dt - now).total_seconds() < -900:
+            continue
+
+        title = str(item.get("title", "") or item.get("name", "") or item.get("event", "")).strip()
+        country = str(item.get("country", "")).strip().upper()
+        if not title:
+            continue
+
+        key = (event_dt, impact)
+        if key not in groups:
+            groups[key] = []
+        groups[key].append((country, title))
+
+    if not groups:
+        return ""
+
+    sorted_keys = sorted(groups.keys(), key=lambda k: k[0])
+    blocks = []
+
+    # ponytail: text output limited by Telegram HTML message payload ceiling of 4096 characters.
+    for dt, impact in sorted_keys:
+        emoji = IMPACT_EMOJI[impact]
+        dt_wib = dt.astimezone(WIB)
+        day_name = INDONESIAN_DAYS[dt_wib.weekday()]
+        time_str = dt_wib.strftime("%H:%M WIB")
+        
+        header = f"{emoji} {day_name}, {time_str}"
+        lines = [header]
+        for country, title in groups[(dt, impact)]:
+            safe_title = html.escape(title)
+            country_tag = f"<b>[{country}]</b>" if country else ""
+            lines.append(f"- {country_tag} - {safe_title}" if country_tag else f"- {safe_title}")
+        
+        blocks.append("\n".join(lines))
+
+    # ponytail: if payload exceeds Telegram 4000 chars, truncate or split (here we take top 4000 chars).
+    full_text = "\n\n".join(blocks)
+    if len(full_text) > 4000:
+        full_text = full_text[:3990] + "\n..."
+    return full_text
 
 def main():
     if not NEWS_URL:
@@ -166,21 +164,16 @@ def main():
         print(f"[ERROR] Failed to fetch news from {NEWS_URL}: {e}")
         sys.exit(1)
 
-    events = parse_economic_news(raw_data)
+    events_text = parse_economic_news(raw_data)
     
-    if events:
-        print(f"[INFO] Found {len(events)} upcoming critical events!")
-        alerts = ["🚨 <b>CRITICAL ECONOMIC NEWS ALERT</b>"]
-        for title, time_info in events[:5]:
-            alerts.append(f"⚠️ There will be <b>{title}</b> {time_info}!")
-        
-        # Send critical news alerts with audible notification sound
-        send_telegram("\n\n".join(alerts), silent=False)
+    if events_text:
+        print("[INFO] Upcoming economic news formatted successfully.")
+        send_telegram(events_text, silent=False)
     else:
-        print("[INFO] No upcoming critical economic news (CPI/FOMC/NFP) scheduled right now.")
+        print("[INFO] No upcoming economic news found.")
         if not SILENT_IF_EMPTY:
-            # Send status checks silently without notification sound/vibration
-            send_telegram("ℹ️ <b>Hourly Economic News Check</b>\n\nNo upcoming critical events (CPI/FOMC/NFP) scheduled right now.", silent=True)
+            send_telegram("ℹ️ <b>Economic News Check</b>\n\nNo upcoming economic news found.", silent=True)
 
 if __name__ == "__main__":
     main()
+
