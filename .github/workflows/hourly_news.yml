@@ -1,12 +1,7 @@
-name: Hourly Economic News Bot
+name: Economic News Bot
 
 on:
-  schedule:
-    # 04:15 to 06:15 WIB (Mon-Fri) -> Sun-Thu 21:15 to 23:15 UTC
-    - cron: '15 21-23 * * 0-4'
-    # 07:15 to 22:15 WIB (Mon-Fri) -> Mon-Fri 00:15 to 15:15 UTC
-    - cron: '15 0-15 * * 1-5'
-  workflow_dispatch:     # Allows manual trigger button in GitHub UI
+  workflow_dispatch:     # Allows trigger via cron-job.org API or manual button in GitHub UI
 
 jobs:
   run-bot:
