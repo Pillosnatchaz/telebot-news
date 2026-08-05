@@ -140,7 +140,7 @@ def parse_economic_news(raw_data: str) -> list[str]:
     now = datetime.now(timezone.utc)
     groups = {}
 
-    CRITICAL_KEYWORDS = ("FOMC", "CPI", "NFP", "FED", "RATE", "INFLATION", "GDP")
+    CRITICAL_KEYWORDS = ("FOMC", "CPI", "NFP", "FED", "RATE", "INFLATION", "GDP", "PMI", "OIL")
 
     for item in data:
         impact = str(item.get("impact", "")).upper()
