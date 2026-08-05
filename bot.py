@@ -188,7 +188,7 @@ def parse_economic_news(raw_data: str) -> list[str]:
         day_name = INDONESIAN_DAYS[dt_wib.weekday()]
         time_str = dt_wib.strftime("%H:%M WIB")
         
-        header = f"{emoji} {day_name}, {time_str}"
+        header = f"{emoji} <b>{day_name}, {time_str}</b>"
         lines = [header]
         for country, title in groups[(dt, impact)]:
             safe_title = html.escape(title)
